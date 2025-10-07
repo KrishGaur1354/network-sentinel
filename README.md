@@ -1,8 +1,51 @@
-# Decky Plugin Template [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
+# Network Sentinel [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
 
-Reference example for using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) in a [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin.
+A comprehensive network monitoring and game server pinging plugin for Steam Deck. Monitor your network quality, ping game servers before launching multiplayer games, and track connection performance over time.
 
-### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates. currently documentation is split between this README and the wiki which is something we are hoping to rectify in the future.**  
+## Screenshots
+
+### Home Panel
+![Network Status](ss/home-ns.jpg)
+### History Panel
+![Network History](ss/history-ns.jpg)
+### Settings Panel
+![Settings](ss/setting-ns.jpg)
+
+## Features
+
+- **Real-time Network Monitoring**: Track latency, packet loss, and connection quality
+- **Game Server Pinging**: Test server latency before launching multiplayer games
+- **Connection Quality Scoring**: Get quality ratings (excellent/good/fair/poor) with detailed metrics
+- **Network History**: View historical connection data and trends
+- **Launch Warnings**: Get warnings before launching games with poor connections
+- **Server Recommendations**: See recommended servers sorted by latency
+- **Visual Indicators**: Color-coded quality indicators and progress bars
+
+## Installation
+
+1. Install via Decky Loader plugin store
+2. Or manually install by downloading the plugin zip file
+3. Enable the plugin in Decky Loader settings
+
+## Usage
+
+1. **Start Monitoring**: Begin continuous network monitoring
+2. **Select Game**: Choose your game from the dropdown
+3. **Check Servers**: Ping game servers to see recommended regions
+4. **View History**: Check network performance over time
+5. **Launch Warning**: Check connection quality before launching games
+
+## Requirements
+
+- Steam Deck with Decky Loader installed
+- Python dependencies: psutil
+- Network connectivity for server pinging
+
+## Development
+
+Built using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) and [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin architecture.
+
+### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates.**  
 
 ## Developers
 
