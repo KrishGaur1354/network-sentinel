@@ -10,21 +10,22 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SteamDeckHomebrew/decky-plugin-template.git"
+    "url": "git+https://github.com/KrishGaur1354/network-sentinel.git"
   },
   "keywords": [
     "decky",
     "plugin",
-    "plugin-template",
+    "network",
+    "monitoring",
     "steam-deck",
     "deck"
   ],
-  "author": "Krish",
+  "author": "Krish Gaur",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"
+    "url": "https://github.com/KrishGaur1354/network-sentinel/issues"
   },
-  "homepage": "https://github.com/SteamDeckHomebrew/decky-plugin-template#readme",
+  "homepage": "https://github.com/KrishGaur1354/network-sentinel#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.1",
     "@decky/ui": "^4.7.2",

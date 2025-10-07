@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["network", "monitoring", "gaming", "performance"],
-    "description": "Monitor network quality, ping game servers, and track connection performance before launching multiplayer games.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+    "description": "Monitor network quality and track connection performance with live ping display, latency graphs, and network history tracking.",
+    "image": "https://raw.githubusercontent.com/KrishGaur1354/network-sentinel/main/ss/home-ns.jpg"
   }
 }
