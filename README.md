@@ -81,4 +81,4 @@ BSD-3-Clause License - see [LICENSE](LICENSE) file for details.
 Created by [Krish Gaur](https://github.com/KrishGaur1354)
 
 - [GitHub](https://github.com/KrishGaur1354)
-- [Twitter](https://twitter.com/KrishGaur1354)
+- [Twitter](https://twitter.com/ThatOneKrish)
