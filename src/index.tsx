@@ -8,13 +8,11 @@ import {
   Navigation
 } from "@decky/ui";
 import {
-  addEventListener,
-  removeEventListener,
   callable,
   definePlugin,
   toaster
 } from "@decky/api"
-import { useState, useEffect, useCallback, VFC } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { FaWifi, FaGithub, FaTwitter, FaNetworkWired, FaPlay, FaStop, FaSyncAlt, FaTrash, FaArrowLeft } from "react-icons/fa";
 
 // backend api calls
@@ -28,6 +26,8 @@ const updateSettings = callable<[settings: any], boolean>("update_settings");
 const getSettings = callable<[], any>("get_settings");
 const getConnectionInfo = callable<[], any>("get_connection_info");
 const testSinglePing = callable<[host?: string], any>("test_single_ping");
+const testDns = callable<[], any>("test_dns");
+const scanWifiNetworks = callable<[], any>("scan_wifi_networks");
 
 interface NetworkStatus {
   quality: {
@@ -35,54 +35,14 @@ interface NetworkStatus {
     score: number;
     avg_latency: number;
     avg_packet_loss: number;
+    jitter?: number;
   };
   network_stats: any;
   monitoring: boolean;
   data_points: number;
+  bandwidth?: { download: number; upload: number; download_bps?: number; upload_bps?: number };
+  dns_status?: any;
 }
-
-// overlay that shows ping on screen
-const PersistentOverlay: VFC<{ ping: number; quality: string; enabled: boolean; position: string }> = ({ ping, quality, enabled, position }) => {
-  if (!enabled) return null;
-
-  const getQualityColor = (quality: string) => {
-    switch (quality) {
-      case 'excellent': return '#4CAF50';
-      case 'good': return '#8BC34A';
-      case 'fair': return '#FF9800';
-      case 'poor': return '#F44336';
-      case 'disconnected': return '#666';
-      default: return '#9E9E9E';
-    }
-  };
-
-  const positionStyles: Record<string, any> = {
-    'top-left': { top: '10px', left: '10px' },
-    'top-right': { top: '10px', right: '10px' },
-    'bottom-left': { bottom: '70px', left: '10px' },
-    'bottom-right': { bottom: '70px', right: '10px' }
-  };
-
-  return (
-    <div style={{
-      position: 'fixed',
-      ...positionStyles[position],
-      backgroundColor: 'rgba(0, 0, 0, 0.9)',
-      padding: '10px 14px',
-      borderRadius: '6px',
-      zIndex: 10000,
-      border: `2px solid ${getQualityColor(quality)}`,
-      minWidth: '180px',
-      backdropFilter: 'blur(10px)',
-      pointerEvents: 'none'
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
-        <FaWifi size={16} style={{ color: getQualityColor(quality) }} />
-        <span style={{ fontWeight: 'bold', fontSize: '20px' }}>{ping > 0 ? ping.toFixed(0) : '--'}ms</span>
-      </div>
-    </div>
-  );
-};
 
 function Content() {
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
@@ -91,31 +51,26 @@ function Content() {
   const [livePing, setLivePing] = useState(0);
   const [settings, setSettings] = useState<any>({});
   const [connectionInfo, setConnectionInfo] = useState<any>({});
+  const [dnsStatus, setDnsStatus] = useState<any>(null);
+  const [speedUnit, setSpeedUnit] = useState<string>('mbps');
+  const [connectionType, setConnectionType] = useState<string>('unknown');
+  const [wifiScan, setWifiScan] = useState<any>(null);
+  const [wifiScanLoading, setWifiScanLoading] = useState(false);
+  const [showRadar, setShowRadar] = useState(false);
+  const [radarSweep, setRadarSweep] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [overlayData, setOverlayData] = useState<any>({ ping: 0, quality: 'unknown', bandwidth: { download: 0, upload: 0 }, enabled: false });
-
-  useEffect(() => {
-    const handleOverlayUpdate = (event: any) => {
-      const data = event.detail;
-      setOverlayData({
-        ping: data.ping || 0,
-        quality: data.quality || 'unknown',
-        bandwidth: data.bandwidth || { download: 0, upload: 0 },
-        enabled: data.enabled || settings.overlay_enabled || false,
-        position: settings.overlay_position || 'top-right'
-      });
-    };
-
-    window.addEventListener('overlay_update', handleOverlayUpdate as any);
-    return () => window.removeEventListener('overlay_update', handleOverlayUpdate as any);
-  }, [settings]);
+  const speedUnits = ['kbps', 'mbps', 'gbps', 'bps'];
 
   const refreshNetworkStatus = useCallback(async () => {
     try {
       const status = await getNetworkStatus();
       setNetworkStatus(status);
       setIsMonitoring(status.monitoring);
+      setDnsStatus(status.dns_status || null);
+      if (status?.quality?.avg_latency) {
+        setLivePing(status.quality.avg_latency);
+      }
     } catch (error) {
       console.error("Failed to get network status:", error);
     }
@@ -135,6 +90,7 @@ function Content() {
     try {
       const loadedSettings = await getSettings();
       setSettings(loadedSettings);
+      setSpeedUnit(loadedSettings.speed_unit || 'mbps');
     } catch (error) {
       console.error("Failed to load settings:", error);
     }
@@ -144,6 +100,9 @@ function Content() {
     try {
       const info = await getConnectionInfo();
       setConnectionInfo(info);
+      if (info?.connection_type) {
+        setConnectionType(info.connection_type);
+      }
     } catch (error) {
       console.error("Failed to load connection info:", error);
     }
@@ -167,11 +126,17 @@ function Content() {
   }, [refreshNetworkStatus, refreshLivePing, loadSettings, loadConnectionInfo, refreshHistory]);
 
   useEffect(() => {
+    if (showHistory) {
+      refreshHistory();
+    }
+  }, [showHistory, refreshHistory]);
+
+  useEffect(() => {
     const interval = setInterval(() => {
       if (isMonitoring) {
         refreshLivePing();
       }
-    }, 2000);
+    }, 1500);
     return () => clearInterval(interval);
   }, [isMonitoring, refreshLivePing]);
 
@@ -207,6 +172,21 @@ function Content() {
     }
   };
 
+  useEffect(() => {
+    // auto start monitoring when users opt in
+    if (settings.auto_monitor && !isMonitoring) {
+      handleStartMonitoring();
+    }
+  }, [settings.auto_monitor, isMonitoring]);
+
+  useEffect(() => {
+    if (!showRadar) return;
+    const id = setInterval(() => {
+      setRadarSweep((deg) => (deg + 20) % 360);
+    }, 250);
+    return () => clearInterval(id);
+  }, [showRadar]);
+
   const handleClearHistory = async () => {
     try {
       await clearHistory();
@@ -239,20 +219,35 @@ function Content() {
     }
   };
 
+  const handleTestDns = async () => {
+    try {
+      const result = await testDns();
+      setDnsStatus(result);
+      if (result.success) {
+        toaster.toast({
+          title: "DNS Test",
+          body: `Resolved in ${result.resolution_time.toFixed(1)}ms via ${result.dns_server}`
+        });
+      } else {
+        toaster.toast({
+          title: "DNS Test Failed",
+          body: result.error || "Could not resolve domain"
+        });
+      }
+    } catch (error) {
+      console.error("Failed to test DNS:", error);
+    }
+  };
+
   const handleUpdateSetting = async (key: string, value: any) => {
     try {
       const newSettings = { ...settings, [key]: value };
       await updateSettings(newSettings);
       setSettings(newSettings);
-      
-      // Update overlay immediately
-      if (key === 'overlay_enabled' || key === 'overlay_position') {
-        setOverlayData({
-          ...overlayData,
-          enabled: newSettings.overlay_enabled,
-          position: newSettings.overlay_position
-        });
+      if (key === 'speed_unit') {
+        setSpeedUnit(value);
       }
+      
     } catch (error) {
       console.error("Failed to update setting:", error);
     }
@@ -269,16 +264,38 @@ function Content() {
     }
   };
 
+  const formatSpeed = (bps?: number) => {
+    if (!bps || bps <= 0) return '--';
+    // convert raw bps into the chosen unit for clarity
+    switch (speedUnit) {
+      case 'gbps':
+        return `${(bps / 1_000_000_000).toFixed(2)} Gbps`;
+      case 'mbps':
+        return `${(bps / 1_000_000).toFixed(2)} Mbps`;
+      case 'kbps':
+        return `${(bps / 1_000).toFixed(1)} Kbps`;
+      case 'bps':
+      default:
+        return `${bps.toFixed(0)} bps`;
+    }
+  };
+
+  const handleRadarScan = async () => {
+    try {
+      // keep radar polling manual to avoid draining battery
+      setWifiScanLoading(true);
+      const result = await scanWifiNetworks();
+      setWifiScan(result);
+    } catch (error) {
+      console.error("Failed to scan Wi-Fi networks:", error);
+    } finally {
+      setWifiScanLoading(false);
+    }
+  };
+
 
   return (
     <div>
-      <PersistentOverlay 
-        ping={overlayData.ping} 
-        quality={overlayData.quality} 
-        enabled={overlayData.enabled}
-        position={overlayData.position || settings.overlay_position || 'top-right'}
-      />
-
       {!showHistory && !showSettings && (
         <>
           <PanelSection title="Network Status">
@@ -321,13 +338,19 @@ function Content() {
                 <PanelSectionRow>
                   <div style={{ 
                     display: 'grid', 
-                    gridTemplateColumns: '1fr 1fr', 
+                    gridTemplateColumns: 'repeat(3, 1fr)', 
                     gap: '8px'
                   }}>
                     <div style={{ textAlign: 'center' }}>
                       <div style={{ fontSize: '9px', color: '#888' }}>Packet Loss</div>
                       <div style={{ fontWeight: 'bold', fontSize: '14px' }}>
                         {networkStatus.quality.avg_packet_loss.toFixed(1)}%
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '9px', color: '#888' }}>Jitter</div>
+                      <div style={{ fontWeight: 'bold', fontSize: '14px' }}>
+                        {(networkStatus.quality.jitter || 0).toFixed(1)}ms
                       </div>
                     </div>
                     <div style={{ textAlign: 'center' }}>
@@ -366,6 +389,12 @@ function Content() {
                 Test Ping Now
         </ButtonItem>
       </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={handleTestDns}>
+                <FaSyncAlt style={{ marginRight: "8px" }} />
+                Test DNS
+              </ButtonItem>
+            </PanelSectionRow>
           </PanelSection>
 
           <PanelSection title="Connection Info">
@@ -379,8 +408,88 @@ function Content() {
                   <span style={{ color: '#888', fontSize: '11px' }}>Host:</span>
                   <span style={{ fontWeight: 'bold', fontSize: '11px' }}>{connectionInfo.hostname || 'N/A'}</span>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#888', fontSize: '11px' }}>Connection:</span>
+                  <span style={{ fontWeight: 'bold', fontSize: '11px', textTransform: 'capitalize' }}>{connectionType || 'unknown'}</span>
+                </div>
+                {dnsStatus && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#888', fontSize: '11px' }}>DNS:</span>
+                    <span style={{ fontWeight: 'bold', fontSize: '11px' }}>
+                      {dnsStatus.success ? `${dnsStatus.dns_server} • ${dnsStatus.resolution_time?.toFixed(1) || 0}ms` : 'unreachable'}
+                    </span>
+                  </div>
+                )}
               </div>
             </PanelSectionRow>
+          </PanelSection>
+
+          <PanelSection title="Wi-Fi Radar">
+            <PanelSectionRow>
+              <ToggleField
+                label="Show Wi-Fi Radar"
+                checked={showRadar}
+                onChange={(value) => setShowRadar(value)}
+              />
+            </PanelSectionRow>
+            {showRadar && (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem
+                    layout="below"
+                    onClick={handleRadarScan}
+                    disabled={wifiScanLoading}
+                  >
+                    <FaSyncAlt style={{ marginRight: "8px" }} />
+                    {wifiScanLoading ? "Scanning..." : "Scan Nearby Wi-Fi"}
+                  </ButtonItem>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center', padding: '8px', background: '#1a1a1a', borderRadius: '6px' }}>
+                    <div style={{ position: 'relative', width: '96px', height: '96px', borderRadius: '50%', border: '2px solid #2c8cff', overflow: 'hidden', background: 'radial-gradient(circle, rgba(44,140,255,0.08) 0%, rgba(44,140,255,0.02) 70%, rgba(44,140,255,0.0) 100%)' }}>
+                      <div style={{ position: 'absolute', inset: '6px', borderRadius: '50%', border: '1px solid rgba(44,140,255,0.35)' }} />
+                      <div style={{ position: 'absolute', inset: '18px', borderRadius: '50%', border: '1px solid rgba(44,140,255,0.25)' }} />
+                      <div style={{ position: 'absolute', inset: '30px', borderRadius: '50%', border: '1px solid rgba(44,140,255,0.2)' }} />
+                      <div style={{ position: 'absolute', inset: '0', transformOrigin: 'center', transform: `rotate(${radarSweep}deg)` }}>
+                        <div style={{ position: 'absolute', top: '48px', left: '48px', width: '48px', height: '2px', background: 'linear-gradient(90deg, rgba(44,140,255,0.8) 0%, rgba(44,140,255,0) 100%)' }} />
+                      </div>
+                      <div style={{ position: 'absolute', inset: '0', borderRadius: '50%', background: 'radial-gradient(circle, rgba(44,140,255,0.18) 0%, rgba(44,140,255,0) 70%)', opacity: 0.6 }} />
+                    </div>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <div style={{ fontSize: '11px', color: '#ccc' }}>Nearby Wi-Fi networks</div>
+                      <div style={{ fontSize: '10px', color: '#888' }}>Channel suggestion updates each scan.</div>
+                    </div>
+                  </div>
+                </PanelSectionRow>
+              </>
+            )}
+            {wifiScan?.error && (
+              <PanelSectionRow>
+                <div style={{ color: '#f66', fontSize: '11px' }}>{wifiScan.error}</div>
+              </PanelSectionRow>
+            )}
+            {wifiScan?.best_channel !== undefined && (
+              <PanelSectionRow>
+                <div style={{ fontSize: '11px', color: '#ccc' }}>
+                  Suggested channel: <span style={{ fontWeight: 'bold' }}>{wifiScan.best_channel}</span> (least congestion)
+                </div>
+              </PanelSectionRow>
+            )}
+            {wifiScan?.networks?.slice(0, 6).map((net: any, idx: number) => (
+              <PanelSectionRow key={`${net.ssid}-${idx}`}>
+                <div style={{ display: 'flex', justifyContent: 'flex-start', gap: '10px', width: '100%' }}>
+                  <div style={{ minWidth: '46%', display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ fontWeight: 'bold', fontSize: '12px' }}>{net.ssid}</span>
+                    <span style={{ fontSize: '10px', color: '#888' }}>{net.band} • Ch {net.channel} • {net.security || 'open'}</span>
+                  </div>
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontSize: '10px', color: '#888' }}>Signal {net.signal}%</div>
+                    <div style={{ fontWeight: 'bold', fontSize: '12px' }}>{net.estimated_latency_ms || '--'} ms</div>
+                    <div style={{ fontSize: '10px', color: '#888' }}>Congestion {net.congestion || 1}x</div>
+                  </div>
+                </div>
+              </PanelSectionRow>
+            ))}
           </PanelSection>
 
           <PanelSection>
@@ -415,21 +524,27 @@ function Content() {
         </ButtonItem>
       </PanelSectionRow>
             <PanelSectionRow>
-              <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                <div style={{ flex: 1 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', width: '100%' }}>
+                <div style={{ minWidth: 0 }}>
                   <ButtonItem 
-                    layout="below" 
+                    layout="inline" 
                     onClick={refreshHistory}
+                    bottomSeparator="none"
                   >
-                    <FaSyncAlt />
+                    <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
+                      <FaSyncAlt size={14} />
+                    </div>
                   </ButtonItem>
                 </div>
-                <div style={{ flex: 1 }}>
+                <div style={{ minWidth: 0 }}>
                   <ButtonItem 
-                    layout="below" 
+                    layout="inline" 
                     onClick={handleClearHistory}
+                    bottomSeparator="none"
                   >
-                    <FaTrash />
+                    <div style={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
+                      <FaTrash size={14} />
+                    </div>
                   </ButtonItem>
                 </div>
               </div>
@@ -506,7 +621,10 @@ function Content() {
                       {dataPoint.live_ping?.toFixed(0) || dataPoint.quality.avg_latency?.toFixed(0) || '--'}ms
                     </div>
                     <div style={{ fontSize: "9px", color: "#888" }}>
-                      {dataPoint.quality.avg_packet_loss?.toFixed(1) || 0}% loss
+                      {dataPoint.quality.avg_packet_loss?.toFixed(1) || 0}% loss • {(dataPoint.quality.jitter || 0).toFixed(1)}ms jitter
+                    </div>
+                    <div style={{ fontSize: "9px", color: "#888" }}>
+                      {formatSpeed(dataPoint.bandwidth?.download_bps || dataPoint.bandwidth?.download)} ↓ / {formatSpeed(dataPoint.bandwidth?.upload_bps || dataPoint.bandwidth?.upload)} ↑
                     </div>
                   </div>
         </div>
@@ -534,14 +652,36 @@ function Content() {
             <PanelSectionRow>
               <SliderField
                 label="Check Interval"
-                value={settings.ping_interval || 30}
-                min={10}
-                max={120}
-                step={10}
+                value={settings.ping_interval || 0.5}
+                min={0.1}
+                max={10}
+                step={0.1}
                 onChange={(value) => handleUpdateSetting('ping_interval', value)}
                 bottomSeparator="none"
-                description={`Check every ${settings.ping_interval || 30}s`}
+                description={`Check every ${(settings.ping_interval || 0.5).toFixed(1)}s`}
               />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Auto Start Monitoring"
+                checked={!!settings.auto_monitor}
+                onChange={(value) => handleUpdateSetting('auto_monitor', value)}
+                description="Begin watching connection on load"
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '6px' }}>
+                <div style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>Speed unit</div>
+                <select
+                  value={speedUnit}
+                  onChange={(e) => handleUpdateSetting('speed_unit', e.target.value)}
+                  style={{ width: '100%', padding: '6px', borderRadius: '6px', background: '#1a1a1a', color: '#fff', border: '1px solid #333' }}
+                >
+                  {speedUnits.map((unit) => (
+                    <option key={unit} value={unit}>{unit.toUpperCase()}</option>
+                  ))}
+                </select>
+              </div>
             </PanelSectionRow>
           </PanelSection>
 
@@ -554,7 +694,7 @@ function Content() {
                 textAlign: 'center'
               }}>
                 <div style={{ fontWeight: 'bold', marginBottom: '6px', fontSize: '14px' }}>
-                  Network Sentinel v1.0.0
+                  Network Sentinel v1.0.4
                 </div>
                 <div style={{ fontSize: '10px', color: '#888', marginBottom: '12px' }}>
                   Network monitoring for Steam Deck
@@ -595,18 +735,9 @@ function Content() {
   );
 }
 
-export default definePlugin(() => {
-  const overlayUpdateListener = addEventListener<[data: any]>("overlay_update", (data) => {
-    window.dispatchEvent(new CustomEvent('overlay_update', { detail: data }));
-  });
-
-  return {
-    name: "Network Sentinel",
-    titleView: <div className={staticClasses.Title}>Network Sentinel</div>,
-    content: <Content />,
-    icon: <FaWifi />,
-    onDismount() {
-      removeEventListener("overlay_update", overlayUpdateListener);
-    },
-  };
-});
+export default definePlugin(() => ({
+  name: "Network Sentinel",
+  titleView: <div className={staticClasses.Title}>Network Sentinel</div>,
+  content: <Content />,
+  icon: <FaWifi />
+}));
