@@ -1,6 +1,6 @@
 {
   "name": "network-sentinel",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Network monitoring and game server pinging plugin for Steam Deck",
   "type": "module",
   "scripts": {
@@ -13,14 +13,14 @@
     "url": "git+https://github.com/KrishGaur1354/network-sentinel.git"
   },
   "keywords": [
-    "decky",
-    "plugin",
+    "ping test",
+    "wifi radar",
     "network",
     "monitoring",
-    "steam-deck",
+    "DNS test",
     "deck"
   ],
-  "author": "Krish Gaur",
+  "author": "ThatOneKrish",
   "license": "BSD-3-Clause",
   "bugs": {
     "url": "https://github.com/KrishGaur1354/network-sentinel/issues"

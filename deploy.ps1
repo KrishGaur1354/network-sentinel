@@ -4,7 +4,7 @@
 # Configuration
 $DECK_HOST = "deck@steamdeck"
 $PLUGIN_NAME = "network-sentinel"
-$PLUGIN_VERSION = "1.0.0"
+$PLUGIN_VERSION = "1.0.4"
 
 Write-Host "Deploying Network Sentinel Plugin to Steam Deck..." -ForegroundColor Green
 
