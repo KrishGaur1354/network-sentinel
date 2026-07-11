@@ -5,6 +5,9 @@ import time
 import threading
 import psutil
 import socket
+import struct
+import random
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import asyncio
@@ -201,13 +204,12 @@ class Plugin:
 
     # Network monitoring methods
     async def start_monitoring(self):
-        """Start continuous network monitoring"""
+        """Start continuous network monitoring (idempotent)"""
         if not self.monitor.monitoring:
             self.monitor.monitoring = True
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
             decky.logger.info("Network monitoring started")
-            return True
-        return False
+        return True
 
     async def stop_monitoring(self):
         """Stop network monitoring"""
@@ -311,14 +313,32 @@ class Plugin:
 
     async def test_single_ping(self, host: str = '8.8.8.8') -> Dict:
         """Test a single ping manually"""
-        return self.monitor.ping_host(host, 3)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.monitor.ping_host, host, 3)
 
     async def get_network_status(self) -> Dict:
-        """Get current network status"""
-        quality_result = self.monitor.test_connection_quality()
+        """Get current network status.
+
+        Never blocks the event loop and reuses recent measurements —
+        fresh pings here caused runaway CPU when the UI polled this call.
+        """
+        loop = asyncio.get_event_loop()
+        now = time.time()
+
+        cached = getattr(self, 'last_quality', None)
+        if cached is not None and (self.monitor.monitoring or now - getattr(self, 'last_ping_time', 0) < 30):
+            quality_result = cached
+        else:
+            quality_result = await loop.run_in_executor(None, self.monitor.test_connection_quality)
+            self.last_quality = quality_result
+            self.last_ping_time = now
+            self.live_ping = quality_result.get('avg_latency', 0)
+
         net_stats = self.monitor.get_network_interface_stats()
-        self.last_dns_status = await self.test_dns()
-        self.last_dns_check = time.time()
+
+        if now - getattr(self, 'last_dns_check', 0) >= 20:
+            self.last_dns_status = await self.test_dns()
+            self.last_dns_check = now
 
         return {
             'quality': quality_result,
@@ -348,10 +368,22 @@ class Plugin:
         """Get current bandwidth statistics"""
         return self.bandwidth_stats
 
+    def _settings_path(self) -> str:
+        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "network-sentinel.json")
+
+    def _save_settings(self):
+        try:
+            with open(self._settings_path(), 'w') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            decky.logger.error(f"Failed to save settings: {e}")
+
     async def update_settings(self, settings: Dict) -> bool:
-        """Update plugin settings"""
+        """Update plugin settings and persist them immediately"""
         try:
             self.settings.update(settings)
+            self.settings['ping_interval'] = max(5, self.settings.get('ping_interval', 30))
+            self._save_settings()
             decky.logger.info(f"Settings updated: {settings}")
             return True
         except Exception as e:
@@ -392,7 +424,14 @@ class Plugin:
         """Get detailed connection information"""
         try:
             hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
+            # hostname lookup often returns 127.0.0.1; a routed UDP socket gives the real address
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                probe.connect(("8.8.8.8", 80))
+                local_ip = probe.getsockname()[0]
+                probe.close()
+            except Exception:
+                local_ip = socket.gethostbyname(hostname)
             conn_type = self._detect_connection_type()
 
             return {
@@ -516,6 +555,242 @@ class Plugin:
             return {"error": str(e)}
 
 
+    def _default_gateway(self) -> Optional[str]:
+        """Read the default gateway from the routing table"""
+        try:
+            route = subprocess.run(
+                ["ip", "route", "show", "default"],
+                capture_output=True, text=True, timeout=3
+            )
+            if route.returncode == 0 and route.stdout:
+                parts = route.stdout.split()
+                if "via" in parts:
+                    return parts[parts.index("via") + 1]
+        except Exception:
+            pass
+        return None
+
+    def _dns_query_time(self, server: str, domain: str = "steampowered.com", timeout: float = 2.0) -> Optional[float]:
+        """Send a raw UDP DNS A query to a specific server and time the response (ms)"""
+        try:
+            tid = random.randint(0, 0xFFFF)
+            header = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
+            question = b"".join(
+                bytes([len(p)]) + p.encode() for p in domain.split(".")
+            ) + b"\x00" + struct.pack(">HH", 1, 1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            start = time.time()
+            sock.sendto(header + question, (server, 53))
+            data, _ = sock.recvfrom(512)
+            elapsed = (time.time() - start) * 1000
+            sock.close()
+            if len(data) >= 2 and struct.unpack(">H", data[:2])[0] == tid:
+                return round(elapsed, 1)
+        except Exception:
+            pass
+        return None
+
+    async def benchmark_dns(self) -> Dict:
+        """Race popular DNS resolvers and report the fastest for this connection"""
+        resolvers = [
+            {"name": "Google", "server": "8.8.8.8"},
+            {"name": "Cloudflare", "server": "1.1.1.1"},
+            {"name": "Quad9", "server": "9.9.9.9"},
+            {"name": "AdGuard", "server": "94.140.14.14"},
+            {"name": "OpenDNS", "server": "208.67.222.222"},
+        ]
+        loop = asyncio.get_event_loop()
+
+        async def probe(entry):
+            # best of 2 queries smooths out one-off spikes
+            times = []
+            for _ in range(2):
+                t = await loop.run_in_executor(None, self._dns_query_time, entry["server"])
+                if t is not None:
+                    times.append(t)
+            return {
+                "name": entry["name"],
+                "server": entry["server"],
+                "time_ms": min(times) if times else None,
+                "reachable": bool(times),
+            }
+
+        results = await asyncio.gather(*[probe(r) for r in resolvers])
+        reachable = [r for r in results if r["reachable"]]
+        fastest = min(reachable, key=lambda r: r["time_ms"]) if reachable else None
+        return {
+            "results": sorted(results, key=lambda r: (r["time_ms"] is None, r["time_ms"] or 0)),
+            "fastest": fastest,
+        }
+
+    async def run_speed_test(self) -> Dict:
+        """Measure download throughput using Cloudflare's speed endpoint.
+
+        Uses curl so TLS verification relies on the system CA store — the
+        sandboxed plugin Python can't find CA certs (CERTIFICATE_VERIFY_FAILED).
+        """
+        url = "https://speed.cloudflare.com/__down?bytes=25000000"
+
+        def _download_curl():
+            result = subprocess.run(
+                ["curl", "-sS", "-o", "/dev/null",
+                 "-w", "%{size_download} %{time_total}",
+                 "--max-time", "12", url],
+                capture_output=True, text=True, timeout=20
+            )
+            # exit 28 = --max-time hit, which is fine: -w still reports partials
+            if result.returncode in (0, 28) and result.stdout.strip():
+                size_s, time_s = result.stdout.strip().split()
+                return float(size_s), float(time_s)
+            raise RuntimeError(result.stderr.strip() or f"curl exit {result.returncode}")
+
+        def _download_urllib():
+            import ssl
+            ctx = None
+            for ca in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"):
+                if os.path.exists(ca):
+                    ctx = ssl.create_default_context(cafile=ca)
+                    break
+            start = time.time()
+            received = 0
+            req = urllib.request.Request(url, headers={"User-Agent": "network-sentinel"})
+            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if time.time() - start > 12:
+                        break
+            return received, time.time() - start
+
+        loop = asyncio.get_event_loop()
+        try:
+            try:
+                received, elapsed = await loop.run_in_executor(None, _download_curl)
+            except FileNotFoundError:
+                received, elapsed = await loop.run_in_executor(None, _download_urllib)
+            if elapsed <= 0 or received == 0:
+                return {"success": False, "error": "No data received"}
+            mbps = (received * 8) / elapsed / 1_000_000
+            return {
+                "success": True,
+                "download_mbps": round(mbps, 2),
+                "bytes": received,
+                "seconds": round(elapsed, 1),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def get_wifi_signal(self) -> Dict:
+        """Signal info for the currently connected Wi-Fi network"""
+        def _query():
+            result = subprocess.run(
+                ["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL,FREQ,CHAN", "device", "wifi", "list"],
+                capture_output=True, text=True, timeout=8
+            )
+            if result.returncode != 0:
+                return {"connected": False}
+            for line in result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 5 and parts[0] == "yes":
+                    try:
+                        signal = int(parts[2])
+                    except Exception:
+                        signal = 0
+                    freq = parts[3]
+                    band = "2.4GHz" if freq and freq.split()[0].isdigit() and float(freq.split()[0]) < 3000 else "5GHz"
+                    return {
+                        "connected": True,
+                        "ssid": parts[1] or "<hidden>",
+                        "signal": signal,
+                        "band": band,
+                        "channel": parts[4],
+                    }
+            return {"connected": False}
+
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, _query)
+        except Exception as e:
+            return {"connected": False, "error": str(e)}
+
+    async def run_network_doctor(self) -> Dict:
+        """One-tap diagnosis: is the lag on the Wi-Fi link, the ISP, or DNS?"""
+        loop = asyncio.get_event_loop()
+        gateway = await loop.run_in_executor(None, self._default_gateway)
+
+        gateway_ping = None
+        if gateway:
+            gateway_ping = await loop.run_in_executor(None, self.monitor.ping_host, gateway, 3)
+
+        internet_ping = await loop.run_in_executor(None, self.monitor.ping_host, "1.1.1.1", 3)
+        dns_result = await self.test_dns()
+        wifi = await self.get_wifi_signal()
+
+        # Build a verdict from the layered results
+        checks = []
+        verdict = "healthy"
+        summary = "Everything looks good. Your connection is game-ready."
+
+        gw_ok = bool(gateway_ping and gateway_ping.get("success"))
+        gw_rtt = gateway_ping.get("avg_rtt", 999) if gateway_ping else None
+        net_ok = internet_ping.get("success", False)
+        net_rtt = internet_ping.get("avg_rtt", 999)
+        net_loss = internet_ping.get("packet_loss", 0)
+        dns_ok = dns_result.get("success", False)
+        dns_ms = dns_result.get("resolution_time", 0)
+
+        if gateway:
+            checks.append({
+                "name": "Router (local link)",
+                "ok": gw_ok and (gw_rtt or 999) < 50,
+                "detail": f"{gw_rtt:.0f}ms to {gateway}" if gw_ok else "Router unreachable",
+            })
+        checks.append({
+            "name": "Internet (1.1.1.1)",
+            "ok": net_ok and net_rtt < 150 and net_loss < 5,
+            "detail": f"{net_rtt:.0f}ms, {net_loss:.0f}% loss" if net_ok else "Unreachable",
+        })
+        checks.append({
+            "name": "DNS lookups",
+            "ok": dns_ok and dns_ms < 300,
+            "detail": f"{dns_ms:.0f}ms" if dns_ok else "Failing",
+        })
+        if wifi.get("connected"):
+            checks.append({
+                "name": f"Wi-Fi signal ({wifi.get('ssid')})",
+                "ok": wifi.get("signal", 0) >= 50,
+                "detail": f"{wifi.get('signal', 0)}% on {wifi.get('band')}",
+            })
+
+        if not net_ok and not gw_ok and gateway:
+            verdict = "no_link"
+            summary = "Can't reach your router. Check Wi-Fi is connected or move closer to it."
+        elif not net_ok and gw_ok:
+            verdict = "isp_down"
+            summary = "Router is fine but the internet is unreachable. This is on your ISP or modem."
+        elif gw_ok and gw_rtt is not None and gw_rtt > 50:
+            verdict = "weak_wifi"
+            summary = "High latency to your own router. Weak Wi-Fi link — move closer or switch to 5GHz."
+        elif wifi.get("connected") and wifi.get("signal", 100) < 40:
+            verdict = "weak_wifi"
+            summary = "Wi-Fi signal is weak. Move closer to the router or reduce obstacles."
+        elif net_ok and (net_rtt > 150 or net_loss >= 5):
+            verdict = "isp_lag"
+            summary = "Local link is fine but internet latency/loss is high. The slowdown is beyond your router."
+        elif not dns_ok or dns_ms > 300:
+            verdict = "slow_dns"
+            summary = "Network is fine but DNS is slow. Try the DNS Benchmark and switch to the fastest server."
+
+        return {
+            "verdict": verdict,
+            "summary": summary,
+            "checks": checks,
+            "gateway": gateway,
+        }
+
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
         self.loop = asyncio.get_event_loop()
@@ -524,7 +799,7 @@ class Plugin:
 
         # Load settings — merge into defaults so missing keys don't break anything
         try:
-            settings_path = os.path.join(decky.DECKY_SETTINGS_DIR, "network-sentinel.json")
+            settings_path = self._settings_path()
             if os.path.exists(settings_path):
                 with open(settings_path, 'r') as f:
                     self.settings.update(json.load(f))
@@ -547,12 +822,7 @@ class Plugin:
             self._stop_event.set()
 
         # Save settings
-        try:
-            settings_path = os.path.join(decky.DECKY_SETTINGS_DIR, "network-sentinel.json")
-            with open(settings_path, 'w') as f:
-                json.dump(self.settings, f, indent=2)
-        except Exception as e:
-            decky.logger.error(f"Failed to save settings: {e}")
+        self._save_settings()
 
     # Function called after `_unload` during uninstall
     async def _uninstall(self):
